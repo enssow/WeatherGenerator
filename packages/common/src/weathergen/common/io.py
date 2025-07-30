@@ -351,34 +351,10 @@ class OutputBatchData:
         )
 
         if key.with_source:
-            source_data = self.sources[sample][stream_idx].cpu().detach().numpy()
-
-            # split data into coords, geoinfo, channels
-            _source_coords = source_data[:, : -len(channels)]
-            source_coords = _source_coords[:, :2]
-            source_times = _source_coords[:, 2]
-            source_geoinfo = _source_coords[:, 2 : -len(channels)]
-
-            # TODO asserts that times, coords, geoinfos should match?
-
-            source_dataset = OutputDataset(
-                "source",
-                key,
-                source_data[:, -len(channels) :],
-                source_times,
-                source_coords,
-                source_geoinfo,
-                channels,
-                geoinfo_channels,
-            )
-
-            _logger.debug(f"source shape: {source_dataset.data.shape}")
-            assert len(channels) == source_dataset.data.shape[1], (
-                "Number of channel names does not align with data"
-            )
-            assert len(geoinfo_channels) == source_dataset.geoinfo.shape[1]
+            self._extract_predictions(sample, stream_idx, key)
         else:
             source_dataset = None
+            
 
         return OutputItem(
             source=source_dataset,
@@ -403,3 +379,43 @@ class OutputBatchData:
                 geoinfo_channels,
             ),
         )
+    
+    def _offset_key(self, key: ItemKey):
+        return ItemKey(
+            key.sample - self.sample_start,
+            key.forecast_step - self.forecast_offset,
+            key.stream
+        )
+        
+    def _extract_predictions(self, sample, stream_idx, key):
+        channels = self.channels[stream_idx]
+        geoinfo_channels = self.geoinfo_channels[stream_idx]
+        
+        source_data = self.sources[sample][stream_idx].cpu().detach().numpy()
+
+        # split data into coords, geoinfo, channels
+        _source_coords = source_data[:, : -len(channels)]
+        source_coords = _source_coords[:, :2]
+        source_times = _source_coords[:, 2]
+        source_geoinfo = _source_coords[:, 2 : -len(channels)]
+
+        # TODO asserts that times, coords, geoinfos should match?
+
+        source_dataset = OutputDataset(
+            "source",
+            key,
+            source_data[:, -len(channels) :],
+            source_times,
+            source_coords,
+            source_geoinfo,
+            channels,
+            geoinfo_channels,
+        )
+
+        _logger.info(f"source shape: {source_dataset.data.shape}")
+        assert len(channels) == source_dataset.data.shape[1], (
+            "Number of channel names does not align with data"
+        )
+        assert len(geoinfo_channels) == source_dataset.geoinfo.shape[1]
+        
+        return source_dataset
