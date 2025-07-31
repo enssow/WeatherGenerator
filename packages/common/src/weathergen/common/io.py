@@ -278,7 +278,8 @@ class OutputBatchData:
     streams: dict[str, int]
 
     # stream, channel name
-    channels: list[list[str]]
+    target_channels: list[list[str]]
+    source_channels: list[list[str]]
     geoinfo_channels: list[list[str]]
 
     sample_start: int
@@ -393,14 +394,14 @@ class OutputBatchData:
         times = self.targets_times[offest_key.forecast_step][stream_idx][
             datapoints
         ]  # make conversion to datetime64[ns] here?
-        channels = self.channels[stream_idx]
+        channels = self.target_channels[stream_idx]
         geoinfo_channels = self.geoinfo_channels[stream_idx]
 
         return DataCoordinates(times, coords, geoinfo, channels, geoinfo_channels)
 
         
     def _extract_predictions(self, sample, stream_idx, key):
-        channels = self.channels[stream_idx]
+        channels = self.source_channels[stream_idx]
         geoinfo_channels = self.geoinfo_channels[stream_idx]
         
         source_data = self.sources[sample][stream_idx].cpu().detach().numpy()
