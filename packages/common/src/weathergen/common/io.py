@@ -311,7 +311,7 @@ class OutputBatchData:
         _logger.debug(f"extracting subset: {key}")
         offest_key = self._offset_key(key)
         stream_idx = self.streams[key.stream]
-        datapoints = self._get_datapoints_per_sample()
+        datapoints = self._get_datapoints_per_sample(offest_key, stream_idx)
 
         _logger.debug(
             f"forecast_step: {key.forecast_step} = {offest_key.forecast_step} (rel_step) + "
@@ -340,7 +340,7 @@ class OutputBatchData:
         )
 
         if key.with_source:
-            self._extract_predictions(offest_key.sample, stream_idx, key)
+            source_dataset = self._extract_sources(offest_key.sample, stream_idx, key)
         else:
             source_dataset = None
 
@@ -396,17 +396,17 @@ class OutputBatchData:
 
         return DataCoordinates(times, coords, geoinfo, channels, geoinfo_channels)
 
-    def _extract_predictions(self, sample, stream_idx, key):
+    def _extract_sources(self, sample, stream_idx, key):
         channels = self.source_channels[stream_idx]
         geoinfo_channels = self.geoinfo_channels[stream_idx]
 
         source_data = self.sources[sample][stream_idx].cpu().detach().numpy()
 
         # split data into coords, geoinfo, channels
-        _source_coords = source_data[:, : -len(channels)]
+        _source_coords = source_data[:, : -len(channels)+1]
         source_coords = _source_coords[:, :2]
         source_times = _source_coords[:, 2]
-        source_geoinfo = _source_coords[:, 2 : -len(channels)]
+        source_geoinfo = _source_coords[:, 2 : -len(channels)+1]
 
         # TODO asserts that times, coords, geoinfos should match?
 
