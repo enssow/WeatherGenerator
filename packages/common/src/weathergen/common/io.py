@@ -403,10 +403,10 @@ class OutputBatchData:
         source_data = self.sources[sample][stream_idx].cpu().detach().numpy()
 
         # split data into coords, geoinfo, channels
-        _source_coords = source_data[:, : -len(channels)+1]
+        _source_coords = source_data[:, : -len(channels) + 1]
         source_coords = _source_coords[:, :2]
         source_times = _source_coords[:, 2]
-        source_geoinfo = _source_coords[:, 2 : -len(channels)+1]
+        source_geoinfo = _source_coords[:, 2 : -len(channels) + 1]
 
         # TODO asserts that times, coords, geoinfos should match?
 
