@@ -77,6 +77,7 @@ def evaluate_from_args(argl: list[str]) -> None:
         results_base_dir = run.get("results_base_dir", None)
 
         if results_base_dir is None:
+            print(private_paths, run_id, run["epoch"])
             cf_run = load_config(private_paths, run_id, run["epoch"])
             cf_run = set_paths(cf_run)
             results_base_dir = Path(cf_run["run_path"])

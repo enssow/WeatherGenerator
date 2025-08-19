@@ -71,10 +71,11 @@ def load_model_config(run_id: str, epoch: int | None, model_path: str | None) ->
         if model_path is None:
             pconf = _load_private_conf()
             model_path = _get_config_attribute(
-                config=pconf, attribute_name="model_path", fallback="models"
+                config=pconf, attribute_name="path_shared_working_dir", fallback="models"
             )
-        model_path = Path(model_path)
+        model_path = Path(model_path + "/models")
         fname = model_path / run_id / _get_model_config_file_name(run_id, epoch)
+        print(fname)
         assert fname.exists(), (
             "The fallback path to the model does not exist. Please provide a `model_path`."
         )
@@ -141,7 +142,7 @@ def load_config(
     if from_run_id is None:
         base_config = _load_default_conf()
     else:
-        base_config = load_model_config(from_run_id, epoch, private_config.get("model_path", None))
+        base_config = load_model_config(from_run_id, epoch, private_config.get("path_shared_working_dir", None))
 
     # use OmegaConf.unsafe_merge if too slow
     return OmegaConf.merge(base_config, private_config, *overwrite_configs)
@@ -354,8 +355,9 @@ def set_paths(config: Config) -> Config:
         config=config, attribute_name="run_path", fallback="results"
     )
     config.model_path = _get_config_attribute(
-        config=config, attribute_name="model_path", fallback="models"
+        config=config, attribute_name="path_shared_working_dir", fallback="models"
     )
+    config.model_path = Path(config.model_path) / "models"
 
     return config
 
