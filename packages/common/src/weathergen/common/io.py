@@ -19,6 +19,7 @@ import numpy as np
 import xarray as xr
 import zarr
 from numpy import datetime64
+from tqdm import tqdm
 from numpy.typing import NDArray
 
 # experimental value, should be inferred more intelligently
@@ -248,6 +249,7 @@ class OutputDataset:
 
     def as_xarray(self, chunk_nsamples=CHUNK_N_SAMPLES) -> xr.DataArray:
         """Convert raw dask arrays into chunked dask-aware xarray dataset."""
+        print(len(self.datapoints), self.data.shape)
         chunks = (chunk_nsamples, *self.data.shape[1:])
 
         # maybe do dask conversion earlier? => usefull for parallel writing?
@@ -382,7 +384,7 @@ class ZarrIO:
         dataset_group.attrs["source_interval"] = dataset.source_interval.as_dict()
 
     def _write_arrays(self, dataset_group: zarr.Group, dataset: OutputDataset):
-        for array_name, array in dataset.arrays.items():  # suffix is eg. data or coords
+        for array_name, array in tqdm(dataset.arrays.items()):  # suffix is eg. data or coords
             self._create_dataset(dataset_group, array_name, array)
 
     def _create_dataset(self, group: zarr.Group, name: str, array: NDArray):

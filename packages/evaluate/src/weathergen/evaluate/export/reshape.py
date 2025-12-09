@@ -228,7 +228,9 @@ class Regridder:
         for item in result:
             original_data_slice = data.values[item]
             regridded_slice = interpolate(
-                original_data_slice, {"grid": self.earthkit_input}, {"grid": self.earthkit_output}
+                original_data_slice, 
+                {"grid": self.earthkit_input}, 
+                {"grid": self.earthkit_output}
             )
             # sSet in regridded_values
             new_index = list(item)
@@ -500,7 +502,7 @@ class Regridder:
         self.input_grid_type = self.detect_input_grid_type()
         self.earthkit_input = self.define_earthkit_input()
         self.earthkit_output, self.grid_shape = self.define_earthkit_output()
-        _logger.info(f"Attempting to regrid from {self.earthkit_input} to {self.earthkit_output}")
+        print(f"Attempting to regrid from {self.earthkit_input} to {self.earthkit_output}")
         # No regridding needed if both input and output are same degree
         if self.input_grid_type == self.output_grid_type:
             if self.earthkit_input == self.earthkit_output:
