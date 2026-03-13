@@ -68,6 +68,10 @@ class VerifParser(CfParser):
         lat, lon, _ = get_obs_coordinates(self.obs)
         self.obs_coords = np.column_stack((lat.values, lon.values))
         self.zarr_coords = None
+        self.zarr_dt = None
+        # updating channels ()
+        required_channels = ["10u", "10v", "sp", "2t", "msl"]  # channels used in verif
+        self.channels = list(set(self.channels) & set(required_channels))
 
     def process_sample(
         self,
@@ -91,8 +95,6 @@ class VerifParser(CfParser):
             )
             return
 
-        required_channels = ["10u", "10v", "sp", "2t", "msl"]
-        self.channels = list(set(self.channels) & set(required_channels))
         da_fs = []
         for result in fstep_iterator_results:
             if result is None:
