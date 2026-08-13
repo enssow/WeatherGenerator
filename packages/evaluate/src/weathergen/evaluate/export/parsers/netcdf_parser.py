@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import xarray as xr
 from omegaconf import OmegaConf
+from pint import UnitRegistry
 
 from weathergen.evaluate.export.cf_utils import CfParser
 from weathergen.evaluate.export.reshape import Regridder, find_pl, get_grid_points
@@ -14,6 +15,8 @@ from weathergen.evaluate.export.reshape import Regridder, find_pl, get_grid_poin
 _logger = logging.getLogger(__name__)
 _logger.setLevel(logging.INFO)
 
+ureg = UnitRegistry()
+Q_ = ureg.Quantity
 """
 Usage:
 
@@ -363,8 +366,15 @@ class NetcdfParser(CfParser):
                     f"Variable '{var_name}' not found in mapping. Update relevant config."
                 ) from e
             mapped_name = mapped_info.get("var", var_name)
+            mapped_units = mapped_info.get("wg_unit", {})
 
             coords = self._build_coordinate_mapping(ds, mapped_info, ds_attrs)
+
+            wg_unit = mapped_units.get(self.stream, mapped_units.get("DEFAULT", None))
+            std_unit = mapped_info.get("std_unit", None)
+            if ureg(wg_unit) != ureg(std_unit):
+                print(f"Converting {var_name} from {wg_unit} to {std_unit} for CF compliance.")
+                da.values = Q_(da.values, ureg(wg_unit)).to(ureg(std_unit)).magnitude
 
             attributes = {
                 "standard_name": mapped_info.get("std", var_name),
@@ -406,11 +416,19 @@ class NetcdfParser(CfParser):
                     f"Variable '{var_name}' not found in mapping. Update relevant config."
                 ) from e
             mapped_name = mapped_info.get("var", var_name)
+            mapped_units = mapped_info.get("wg_unit", {})
+
             dims = dims_list.copy()
             if mapped_info.get("level_type") == "sfc":
                 dims.remove("pressure")
 
             coords = self._build_coordinate_mapping(ds, mapped_info, ds_attrs)
+
+            wg_unit = mapped_units.get(self.stream, mapped_units.get("DEFAULT", None))
+            std_unit = mapped_info.get("std_unit", None)
+            if ureg(wg_unit) != ureg(std_unit):
+                print(f"Converting {var_name} from {wg_unit} to {std_unit} for CF compliance.")
+                da.values = Q_(da.values, ureg(wg_unit)).to(ureg(std_unit)).magnitude
 
             attributes = {
                 "standard_name": mapped_info.get("std", var_name),
