@@ -448,8 +448,6 @@ class ZarrIO:
             try:
                 #####WARNING IS APPEARING HERE TOO#####
                 group = self.data_root.get(item.path)
-                print("item_path:", item.path)
-                print("group:", group)
                 assert group is not None, f"Zarr group: {item.path} does not exist."
             except KeyError as e:
                 msg = f"Zarr group: {item.path} has not been created."
@@ -491,26 +489,16 @@ class ZarrIO:
 
     @functools.cached_property
     def forecast_offset(self) -> int:
-        print("example_key", self.example_key)
         fstep0_datasets = self._get_datasets(self.example_key)
         return ItemKey._infer_forecast_offset(fstep0_datasets)
 
     @functools.cached_property
     def example_key(self) -> ItemKey:
         try:
-            print("self.data_root:", self.data_root)
             sample, example_sample = next(self.data_root.groups())
-            for stream_name, candidate in example_sample.groups():
-                if list(candidate.group_keys()):
-                    item_path = ItemKey(sample, forecast_step=list(candidate.group_keys())[0], stream=stream_name).path
-                    fstep_data = self.data_root.get(item_path)
-                    available_arrays = next(fstep_data.group_keys())
-                    print(item_path + "/" + available_arrays)
-                    array_data = self.data_root.get(item_path + "/" + available_arrays)
-                    if np.squeeze(array_data["times"].shape) != 0:
-                        # choose stream
-                        stream = stream_name
-                        break
+            for stream, candidate in example_sample.groups():
+                if self.validate_stream(sample, stream, candidate):
+                    break
             if candidate is None:
                 msg = f"No stream with forecast steps found in {self._store_path}"
                 raise FileNotFoundError(msg)
@@ -518,7 +506,6 @@ class ZarrIO:
         except StopIteration as e:
             msg = f"Data store at: {self._store_path} is empty."
             raise FileNotFoundError(msg) from e
-        print("Returning ItemKey:", ItemKey(sample, fstep, stream))
         return ItemKey(sample, fstep, stream)
 
     @functools.cached_property
@@ -539,36 +526,30 @@ class ZarrIO:
         # assume stream/samples/forecast_steps are orthogonal
         _, example_sample = next(self.data_root.groups())
         _, example_stream = next(example_sample.groups())
-        # # Find the first stream that actually contains forecast step groups.
-        # # The first stream alphabetically (e.g. "latent") may be empty or
-        # # have a different structure than the primary data streams.
-        # example_stream = None
-        # for _, candidate in example_sample.groups():
-        #     print(f"Checking stream {candidate.name} for forecast steps...")
-        #     child_keys = list(candidate.group_keys())
-        #     if child_keys:
-        #         example_stream = candidate
-        #         break
-
-        # if example_stream is None:
-        #     msg = f"No stream with forecast steps found in {self._store_path}"
-        #     raise FileNotFoundError(msg)
 
         all_steps = sorted(list(example_stream.group_keys()))
-        print(f"Found forecast steps: {all_steps}")
-        print(self.__dict__)
-        print(self.forecast_offset)
         if self.forecast_offset == 1:
             return all_steps[1:]  # exclude fstep with no targets/preds
         else:
             return all_steps
+
+    def validate_stream(self, sample: str, stream:str, candidate: zarr.Group) -> bool:
+        """Check if a stream exists and has non zero time data in fsteps"""
+        if list(candidate.group_keys()):
+            item_path = ItemKey(sample, forecast_step=list(candidate.group_keys())[0], stream=stream).path
+            fstep_data = self.data_root.get(item_path)
+            available_arrays = next(fstep_data.group_keys())
+            array_data = self.data_root.get(item_path + "/" + available_arrays)
+            if np.squeeze(array_data["times"].shape) != 0:
+                return True
+
+        return False
 
 
 class ZipZarrIO(ZarrIO):
     def __enter__(self) -> typing.Self:
         _logger.debug(f"Opening zipstore, read-only: {self.read_only}")
         self._store = ZipStore(self._store_path, mode=self._mode, read_only=self.read_only)
-        print("ziparrio attrs", self._store_path, self._mode, self.read_only)
         if self.read_only:
             self.data_root = zarr.open_group(store=self._store, mode=self._mode)
         else:
