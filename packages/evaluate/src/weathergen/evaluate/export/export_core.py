@@ -198,9 +198,10 @@ def get_channels(channels, stream: str, fname_zarr: str) -> list[str]:
     """
     with zarrio_reader(fname_zarr) as zio:
         zio_forecast_steps = sorted([int(step) for step in zio.forecast_steps])
-        dummy_out = zio.get_data(0, stream, zio_forecast_steps[0])
-        all_channels = dummy_out.target.channels
-
+        print("get_data",1,stream,zio_forecast_steps[0])
+        dummy_out = zio.get_data(1, stream, zio_forecast_steps[0])
+        # if target doesn't exist, try prediction
+        all_channels = list(dummy_out.prediction.channels) if dummy_out.prediction is not None else dummy_out.target.channels
         if channels is not None:
             existing_channels = set(all_channels) & set(channels)
             if existing_channels != set(channels):
