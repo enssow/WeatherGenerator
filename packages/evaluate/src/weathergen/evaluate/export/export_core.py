@@ -274,7 +274,8 @@ def get_source_info(fname_zarr, stream, samples) -> tuple[list[np.datetime64], l
             source_group = zio.data_root.get(group_path)
 
             if source_group is None:
-                raise FileNotFoundError(f"Zarr group '{group_path}' not found in {fname_zarr}")
+                _logger.warning(f"Nothing found at {group_path}, using default source interval for sample {sample}.")
+                return [None] * len(samples), [None] * len(samples)
 
             times_arr = np.asarray(source_group["times"]).astype("datetime64[ns]")
             source_start = np.min(times_arr)
