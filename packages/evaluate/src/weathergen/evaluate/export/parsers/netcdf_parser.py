@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import xarray as xr
 from omegaconf import OmegaConf
-from pint import UnitRegistry
+from pint import UnitRegistry, DimensionalityError
 
 from weathergen.evaluate.export.cf_utils import CfParser
 from weathergen.evaluate.export.reshape import Regridder, find_pl, get_grid_points
@@ -355,6 +355,8 @@ class NetcdfParser(CfParser):
             xr.Dataset
                 Dataset with CF-compliant variable attributes.
         """
+        unit_conversion = { "m": {"kg*m-2*s-1": 1/(3.6 * self.fstep_hours.astype("int64"))}, 
+                           "W/m^2": {"J m-2": 1/(3600 * self.fstep_hours.astype("int64"))}}
         variables = {}
         dims_cfg = self.config.get("dimensions", {})
         ds, ds_attrs = self._assign_dim_attrs(ds, dims_cfg)
@@ -373,8 +375,13 @@ class NetcdfParser(CfParser):
             wg_unit = mapped_units.get(self.stream, mapped_units.get("DEFAULT", None))
             std_unit = mapped_info.get("std_unit", None)
             if ureg(wg_unit) != ureg(std_unit):
-                print(f"Converting {var_name} from {wg_unit} to {std_unit} for CF compliance.")
-                da.values = Q_(da.values, ureg(wg_unit)).to(ureg(std_unit)).magnitude
+                try:
+                    print(f"Converting {var_name} from {wg_unit} to {std_unit} for CF compliance.")
+                    da.values = Q_(da.values, ureg(wg_unit)).to(ureg(std_unit)).magnitude
+                except DimensionalityError as e:
+                    print(f"Error converting {var_name} from {wg_unit} to {std_unit}: {e}; using manual lookup")
+                    if wg_unit in unit_conversion and std_unit in unit_conversion[wg_unit]:
+                        da.values = da.values * unit_conversion[wg_unit][std_unit]
 
             attributes = {
                 "standard_name": mapped_info.get("std", var_name),
