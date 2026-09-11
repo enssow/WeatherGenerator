@@ -528,10 +528,7 @@ class ZarrIO:
         _, example_stream = next(example_sample.groups())
 
         all_steps = sorted(list(example_stream.group_keys()))
-        if self.forecast_offset == 1:
-            return all_steps[1:]  # exclude fstep with no targets/preds
-        else:
-            return all_steps
+        return all_steps
 
     def validate_stream(self, sample: str, stream:str, candidate: zarr.Group) -> bool:
         """Check if a stream exists and has non zero time data in fsteps"""
