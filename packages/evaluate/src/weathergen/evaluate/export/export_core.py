@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 from tqdm import tqdm
 
 from weathergen.common.config import (
@@ -333,7 +333,7 @@ def export_model_outputs(data_type: str, config: OmegaConf, **kwargs) -> None:
 
     # --- Discover rank files ---
     # get_model_results accepts lists of epochs and ranks ("all" or list of ints).
-    rank_arg = ["all"] if rank == "all" else (rank if isinstance(rank, list) else [rank])
+    rank_arg = ["all"] if rank == "all" else (rank if isinstance(rank, ListConfig) else [rank])
     rank_files = get_model_results(run_id, [epoch], rank_arg)
     if not rank_files:
         raise FileNotFoundError(
