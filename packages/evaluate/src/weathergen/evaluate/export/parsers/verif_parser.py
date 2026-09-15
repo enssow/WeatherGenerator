@@ -106,7 +106,23 @@ class VerifParser(CfParser):
             # result is already a materialized xarray DataArray (built in the worker).
             if not isinstance(result, xr.DataArray):
                 result = result.as_xarray().squeeze()
-            result = result.sel(channel=self.channels)
+            if "channel" not in result.indexes:
+                result = result.expand_dims("channel")
+                
+            # Get unique valid times
+            unique_times = np.sort(np.unique(result.valid_time.values))
+
+            for vt in unique_times:
+                sub = result.sel(channel=self.channels, valid_time=vt)
+
+                if len(unique_times) > 1:
+                    # Reassign ipoint so that the same spatial point indices are used
+                    # for each unique valid_time
+                    new_ipoint = sub.ipoint.copy(data=np.arange(sub.sizes["ipoint"]))
+                    sub = sub.assign_coords(ipoint=new_ipoint)
+
+                sub = self.reshape(sub)
+                da_fs.append(sub)
             result = self.preprocess(result)
             result = self.reshape(result)
             da_fs.append(result)
