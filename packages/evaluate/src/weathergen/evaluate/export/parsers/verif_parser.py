@@ -510,8 +510,8 @@ class VerifParser(CfParser):
         if "forecast_reference_time" in ds.coords:
             ds["forecast_reference_time"].encoding.update(time_encoding)
 
-        # if "leadtime" in ds.coords:
-        #     ds["leadtime"].encoding.update({"coordinates": "forecast_reference_time"})
+        if "leadtime" in ds.coords:
+            ds["leadtime"].encoding.update({"coordinates": "forecast_reference_time"})
 
         return ds
 

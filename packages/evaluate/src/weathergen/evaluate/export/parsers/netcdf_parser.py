@@ -103,7 +103,7 @@ class NetcdfParser(CfParser):
                     "Check that inference was not performed with masking"
                 )
             da_fs = self.concatenate(da_fs)
-            a_fs = self.assign_frt(da_fs, ref_time)
+            da_fs = self.assign_frt(da_fs, ref_time)
             da_fs = self.add_attrs(da_fs)
             da_fs = self.add_metadata(da_fs)
             da_fs = self.add_encoding(da_fs)
