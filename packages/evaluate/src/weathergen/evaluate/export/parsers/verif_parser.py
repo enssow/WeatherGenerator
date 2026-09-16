@@ -120,12 +120,10 @@ class VerifParser(CfParser):
                     # for each unique valid_time
                     new_ipoint = sub.ipoint.copy(data=np.arange(sub.sizes["ipoint"]))
                     sub = sub.assign_coords(ipoint=new_ipoint)
-
+                
+                sub = self.preprocess(sub)
                 sub = self.reshape(sub)
                 da_fs.append(sub)
-            result = self.preprocess(result)
-            result = self.reshape(result)
-            da_fs.append(result)
 
         _logger.info(f"Retrieved {len(da_fs)} forecast steps for type {self.data_type}.")
 
@@ -299,7 +297,7 @@ class VerifParser(CfParser):
             valid_time = ds_var.coords["time"] + np.timedelta64(int(leadtime), "h")
             if verif_var == "mslp":
                 obs_dataarray[:, i, :] = compute_mslp(obs_data, valid_time)
-            if verif_var == "tp":
+            elif verif_var == "tp":
                 obs_dataarray[:, i, :] = compute_precip(obs_data, self.zarr_dt, valid_time)
             else:
                 obs_dataarray[:, i, :] = obs_data.data_vars[obs_name].sel(time=valid_time)
@@ -370,7 +368,7 @@ class VerifParser(CfParser):
             ),
             "leadtime": (
                 ["leadtime"],
-                np.atleast_1d(ds_var.coords["leadtime"].values.astype("float32")),
+                np.atleast_1d(ds_var.coords["leadtime"].values),
                 ds_var["leadtime"].attrs,
             ),
         }
@@ -643,15 +641,21 @@ class VerifParser(CfParser):
                 Coordinate mapping for the variable.
         """
         coords = {}
+        print("var_cfg", var_cfg)
         coord_map = self.config.get("coordinates", {}).get(var_cfg.get("level_type"), {})
-
+        
         for coord, new_name in coord_map.items():
-            coords[new_name] = (
-                ds.coords[coord].dims,
-                ds.coords[coord].values,
-                attrs[new_name],
-            )
-
+            try:
+                coords[new_name] = (
+                    ds.coords[coord].dims,
+                    ds.coords[coord].values,
+                    attrs[new_name],
+                )
+            except KeyError:
+                _logger.warning(
+                    f"Coordinate '{coord}' will be skipped for "
+                    f"variable '{var_cfg.get('var', 'unknown')}'."
+                )
         return coords
 
     def merge(self, ds, obs_ds):
