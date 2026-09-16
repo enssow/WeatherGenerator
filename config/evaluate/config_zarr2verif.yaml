@@ -108,7 +108,7 @@ dimensions:
       verif: leadtime
       std: forecast_period
       long: time since forecast_reference_time
-      verif_unit: hour
+      #verif_unit: hour
     ncells:
       verif: ncells
       std: ncells
