@@ -282,7 +282,9 @@ class NetcdfParser(CfParser):
 
         if "sample" in ds.coords:
             ds = ds.drop_vars("sample")
-
+            
+        n_hours = self.fstep_hours.astype("int64")
+        ds["forecast_step"] = ds["forecast_step"] * n_hours
         return ds
 
     def add_attrs(self, ds: xr.Dataset) -> xr.Dataset:
