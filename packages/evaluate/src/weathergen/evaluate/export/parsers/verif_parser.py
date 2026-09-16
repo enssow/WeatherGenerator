@@ -17,7 +17,6 @@ from weathergen.evaluate.export.reshape import (
 )
 from weathergen.evaluate.export.verif_interpolator import InterpolatorFactory
 from weathergen.evaluate.utils.derived_channels import compute_mslp, compute_precip
-FORECAST_STEP_WINDOW = 6 # Window size for each forecast step in hours
 _logger = logging.getLogger(__name__)
 _logger.setLevel(logging.INFO)
 
@@ -92,12 +91,12 @@ class VerifParser(CfParser):
         -------
             None
         """
-        # # check ref_time exists in the obs data
-        # if ref_time not in self.obs.time.values:
-        #     _logger.warning(
-        #         f"Reference time {ref_time} not found in observation data. Skipping sample."
-        #     )
-        #     return
+        # check ref_time exists in the obs data
+        if ref_time not in self.obs.time.values:
+            _logger.warning(
+                f"Reference time {ref_time} not found in observation data. Skipping sample."
+            )
+            return
 
         da_fs = []
         for result in fstep_iterator_results:
@@ -130,8 +129,7 @@ class VerifParser(CfParser):
         if da_fs:
             if self.zarr_coords is None:
                 self.zarr_coords = get_grid_points(da_fs[0])
-                self.zarr_dt = np.timedelta64(1, "h")  # Default to 1 hour if source_interval_start and source_interval_end are not provided
-                #self.zarr_dt = self.get_zarr_dt(source_interval_start, source_interval_end)
+                self.zarr_dt = self.get_zarr_dt(source_interval_start, source_interval_end)
             # check consistency of grid points across forecast steps
             if len(da_fs) > 1:
                 assert np.array_equal(get_grid_points(da_fs[1]), get_grid_points(da_fs[0])), (
@@ -139,8 +137,6 @@ class VerifParser(CfParser):
                     "Check that inference was not performed with masking"
                 )
             da_fs = self.concatenate(da_fs)
-            if ref_time is None:
-                ref_time = np.datetime64(da_fs.valid_time.values[0] - np.timedelta64((da_fs.forecast_step.values[0]) * FORECAST_STEP_WINDOW, "h"))
             da_fs = self.assign_frt(da_fs, ref_time)
             da_fs = self.add_attrs(da_fs)
             vars_to_merge = {verif_var: None for verif_var in self.mapping.keys()}
@@ -472,9 +468,8 @@ class VerifParser(CfParser):
 
         if "sample" in ds.coords:
             ds = ds.drop_vars("sample")
-        #n_hours = self.fstep_hours.astype("int64")
-        #ds["forecast_step"] = ds["forecast_step"] * n_hours
-        ds["forecast_step"] = ds["valid_time"] - ds["forecast_reference_time"]
+        n_hours = self.fstep_hours.astype("int64")
+        ds["forecast_step"] = ds["forecast_step"] * n_hours
         return ds
 
     def add_attrs(self, ds: xr.Dataset) -> xr.Dataset:
@@ -641,7 +636,6 @@ class VerifParser(CfParser):
                 Coordinate mapping for the variable.
         """
         coords = {}
-        print("var_cfg", var_cfg)
         coord_map = self.config.get("coordinates", {}).get(var_cfg.get("level_type"), {})
         
         for coord, new_name in coord_map.items():
