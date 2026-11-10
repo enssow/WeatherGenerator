@@ -12,7 +12,6 @@ import json
 import logging
 import math
 import time
-import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,15 +23,13 @@ import torch
 import weathergen.common.config as config
 
 # from weathergen.train.trainer import cfg_keys_to_filter
-from weathergen.train.utils import Stage, cfg_keys_to_filter, flatten_dict, get_active_stage_config
+from weathergen.train.utils import Stage, flatten_dict
 from weathergen.utils.distributed import ddp_average
 from weathergen.utils.metrics import get_train_metrics_path, read_metrics_file
 
 _weathergen_timestamp = "weathergen.timestamp"
 _weathergen_reltime = "weathergen.reltime"
 _weathergen_time = "weathergen.time"
-_performance_gpu = "perf.gpu"
-_performance_memory = "perf.memory"
 
 _logger = logging.getLogger(__name__)
 
@@ -61,11 +58,11 @@ class Metrics:
 
 class TrainLogger:
     #######################################
-    def __init__(self, cf, path_run: Path) -> None:
+    def __init__(self, cf, path_results: Path) -> None:
         self.cf = cf
-        self.path_run = path_run
+        self.path_results = path_results
 
-    def log_metrics(self, stage: Stage, metrics: dict[str, float]) -> None:
+    def log_metrics(self, stage: Stage, metrics: dict[str, float], step: int | None = None) -> None:
         """
         Log metrics to a file.
         For now, just scalar values are expected. There is no check.
@@ -77,6 +74,8 @@ class TrainLogger:
             _weathergen_time: int(datetime.datetime.now().strftime("%Y%m%d%H%M%S")),
             "stage": stage,
         }
+        if step is not None:
+            clean_metrics["weathergen.step"] = step
         for key, value in metrics.items():
             v = float(value)
             if math.isnan(v) or math.isinf(v):
@@ -87,7 +86,7 @@ class TrainLogger:
         # but we can probably do better and rely for example on the logging module.
 
         metrics_path = get_train_metrics_path(
-            base_path=config.get_path_run(self.cf), run_id=self.cf.general.run_id
+            base_path=self.path_results, run_id=self.cf.general.run_id
         )
         with open(metrics_path, "ab") as f:
             s = json.dumps(clean_metrics) + "\n"
@@ -102,32 +101,44 @@ class TrainLogger:
         stddev_all: dict,
         avg_loss: list[float] = None,
         lr: float = None,
-        perf_gpu: float = 0.0,
-        perf_mem: float = 0.0,
+        elapsed_training_time_seconds: float | None = None,
     ) -> None:
         """
-        Log training or validation data
+        Log training or validation data.
         """
         metrics: dict[str, float] = dict(num_samples=samples)
 
         if stage == "train":
-            metrics["loss_avg_mean"] = np.nanmean(avg_loss)
+            val = np.nan if np.isnan(avg_loss).all() else np.nanmean(avg_loss)
+            metrics["loss_avg_mean"] = val
             metrics["learning_rate"] = lr
             metrics["num_samples"] = int(samples)
-            metrics[_performance_gpu] = perf_gpu
-            metrics[_performance_memory] = perf_mem
+            if elapsed_training_time_seconds is not None:
+                metrics["elapsed_training_time_seconds"] = elapsed_training_time_seconds
+                metrics["average_samples_per_second"] = (
+                    samples / elapsed_training_time_seconds
+                    if elapsed_training_time_seconds > 0
+                    else 0
+                )
 
         for key, value in losses_all.items():
-            metrics[key] = np.nanmean(value)
+            val = np.nan if np.isnan(value).all() else np.nanmean(value)
+            metrics[key] = val
 
         for key, value in stddev_all.items():
-            metrics[key] = np.nanmean(value)
+            val = np.nan if np.isnan(value).all() else np.nanmean(value)
+            metrics[key] = val
 
         self.log_metrics(stage, metrics)
 
     #######################################
     @staticmethod
-    def read(run_id: str, model_path: str = None, mini_epoch: int | None = None) -> Metrics:
+    def read(
+        run_id: str,
+        model_path: str = None,
+        mini_epoch: int | None = None,
+        cols_patterns: list[str] | None = None,
+    ) -> Metrics:
         """
         Read data for run_id
         """
@@ -141,106 +152,21 @@ class TrainLogger:
             )
         run_id = cf.general.run_id
 
-        result_dir_base = config.get_path_run(cf)
-        result_dir = result_dir_base / run_id
-        fname_log_train = result_dir / f"{run_id}_train_log.txt"
-        fname_log_val = result_dir / f"{run_id}_val_log.txt"
-
-        # training
+        result_dir_base = config.get_path_results(cf)
 
         # define cols for training
-        training_cfg = get_active_stage_config(cf.training_config, {}, cfg_keys_to_filter)
-        cols1, cols_train = get_loss_terms_per_stream(cf.streams, training_cfg)
-        cols_train += ["dtime", "samples", "mse", "lr"]
-        cols1 += [_weathergen_timestamp, "num_samples", "loss_avg_mean", "learning_rate"]
+        cols1 = [_weathergen_timestamp, "num_samples", "loss_avg_mean", "learning_rate"]
+        cols1_patterns = ["loss_avg"] + cols_patterns
 
-        # read training log data
-        try:
-            with open(fname_log_train, "rb") as f:
-                log_train = np.loadtxt(f, delimiter=",")
-            log_train = log_train.reshape((log_train.shape[0] // len(cols_train), len(cols_train)))
-        except (
-            TypeError,
-            AttributeError,
-            IndexError,
-            ZeroDivisionError,
-            ValueError,
-        ) as e:
-            _logger.warning(
-                (
-                    f"Warning: no training data loaded for run_id={run_id}",
-                    "Data loading or reshaping failed — "
-                    "possible format, dimension, or logic issue.",
-                    f"Due to specific error: {e}",
-                )
-            )
-        except (FileNotFoundError, PermissionError, OSError) as e:
-            _logger.error(
-                (
-                    f"Error: no training data loaded for run_id={run_id}",
-                    "File system error occurred while handling the log file.",
-                    f"Due to specific error: {e}",
-                )
-            )
-        except Exception:
-            _logger.error(
-                (
-                    f"Error: no training data loaded for run_id={run_id}",
-                    f"Due to exception with trace:\n{traceback.format_exc()}",
-                )
-            )
-            log_train = np.array([])
+        metrics_train = read_metrics(cf, run_id, "train", cols1, cols1_patterns, result_dir_base)
 
-        log_train_df = read_metrics(cf, run_id, "train", cols1, result_dir_base)
-
-        # validation
         # define cols for validation
-        validation_cfg = get_active_stage_config(
-            training_cfg, cf.get("validation_config", {}), cfg_keys_to_filter
-        )
-        cols2, cols_val = get_loss_terms_per_stream(cf.streams, validation_cfg)
-        cols_val = ["dtime", "samples"]
         cols2 = [_weathergen_timestamp, "num_samples"]
+        cols2_patterns = ["loss_avg"] + cols_patterns
 
-        # read validation log data
-        try:
-            with open(fname_log_val, "rb") as f:
-                log_val = np.loadtxt(f, delimiter=",")
-            log_val = log_val.reshape((log_val.shape[0] // len(cols_val), len(cols_val)))
-        except (
-            TypeError,
-            AttributeError,
-            IndexError,
-            ZeroDivisionError,
-            ValueError,
-        ) as e:
-            _logger.warning(
-                (
-                    f"Warning: no validation data loaded for run_id={run_id}",
-                    "Data loading or reshaping failed — "
-                    "possible format, dimension, or logic issue.",
-                    f"Due to specific error: {e}",
-                )
-            )
-        except (FileNotFoundError, PermissionError, OSError) as e:
-            _logger.error(
-                (
-                    f"Error: no validation data loaded for run_id={run_id}",
-                    "File system error occurred while handling the log file.",
-                    f"Due to specific error: {e}",
-                )
-            )
-        except Exception:
-            _logger.error(
-                (
-                    f"Error: no validation data loaded for run_id={run_id}",
-                    f"Due to exception with trace:\n{traceback.format_exc()}",
-                )
-            )
-            log_val = np.array([])
-        metrics_val_df = read_metrics(cf, run_id, "val", cols2, result_dir_base)
+        metrics_val = read_metrics(cf, run_id, "val", cols2, cols2_patterns, result_dir_base)
 
-        return Metrics(run_id, "train", log_train_df, metrics_val_df, None)
+        return Metrics(run_id, "train", metrics_train, metrics_val, None)
 
 
 def read_metrics(
@@ -248,6 +174,7 @@ def read_metrics(
     run_id: RunId | None,
     stage: Stage | None,
     cols: list[str] | None,
+    cols_patterns: list[str] | None,
     results_path: Path,
 ) -> pl.DataFrame:
     """
@@ -266,6 +193,11 @@ def read_metrics(
     metrics_path = get_train_metrics_path(base_path=results_path, run_id=run_id)
     # TODO: this should be a config option
     df = read_metrics_file(metrics_path)
+
+    if cols_patterns is not None:
+        for col_pattern in cols_patterns:
+            cols += [col for col in df.columns if col_pattern in col]
+
     if stage is not None:
         df = df.filter(pl.col("stage") == stage)
     df = df.drop("stage")
@@ -302,53 +234,6 @@ def clean_df(df, columns: list[str] | None):
         df = df.filter(~pl.all_horizontal(pl.col(c).is_null() for c in columns))
 
     return df
-
-
-def clean_name(s: str) -> str:
-    """
-    Remove all characters from a string except letters, digits, and underscores.
-
-    Args:
-        s (str): The input string.
-
-    Returns:
-        str: A new string containing only alphanumeric characters and underscores,
-             in the same order and capitalization as they appeared in the input.
-    """
-    return "".join(c for c in s if c.isalnum() or c == "_")
-
-
-def get_loss_terms_per_stream(streams, stage_config):
-    """
-    Extract per stream loss terms
-    """
-    cols, cols_stage = [], []
-    for si in streams:
-        for _, loss_config in stage_config.get("losses", {}).items():
-            if loss_config.get("type", "LossPhysical") == "LossPhysical":
-                for lname, _ in loss_config.loss_fcts.items():
-                    cols += [_key_loss(si["name"], lname)]
-                    cols_stage += [_clean_stream_name(si["name"]) + lname]
-    return cols, cols_stage
-
-
-def _clean_stream_name(stream_name: str) -> str:
-    return stream_name.replace(",", "").replace("/", "_").replace(" ", "_") + ", "
-
-
-def _key_loss(st_name: str, lf_name: str) -> str:
-    st_name = clean_name(st_name)
-    return f"LossPhysical.{st_name}.{lf_name}.avg"
-
-
-def _key_loss_chn(st_name: str, lf_name: str, ch_name: str) -> str:
-    st_name = clean_name(st_name)
-    return f"stream.{st_name}.loss_{lf_name}.loss_{ch_name}"
-
-
-def _key_stddev(st_name: str) -> str:
-    st_name = clean_name(st_name)
-    return f"stream.{st_name}.stddev_avg"
 
 
 def prepare_losses_for_logging(

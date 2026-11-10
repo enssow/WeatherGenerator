@@ -1,3 +1,5 @@
+# pylint: disable=bad-builtin
+
 import logging
 from pathlib import Path
 
@@ -5,6 +7,7 @@ import earthkit.data as ekd
 import numpy as np
 import pandas as pd
 import xarray as xr
+from numpy.typing import NDArray
 from omegaconf import OmegaConf
 
 from weathergen.evaluate.export.cf_utils import CfParser
@@ -35,25 +38,26 @@ class QuaverParser(CfParser):
         """
         Initialize Quaver parser with configuration and additional parameters.
         """
+
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-        if not hasattr(self, "quaver_template_folder"):
+        if not hasattr(self, "quaver_template_folder") or self.quaver_template_folder is None:
             raise ValueError("Template folder must be provided for Quaver format.")
-        if not hasattr(self, "quaver_template_grid_type"):
+        if not hasattr(self, "quaver_template_grid_type") or self.quaver_template_grid_type is None:
             raise ValueError("Template grid type must be provided for Quaver format.")
-        if not hasattr(self, "channels"):
+        if not hasattr(self, "channels") or self.channels is None:
             raise ValueError("Channels must be provided for Quaver format.")
-        if not hasattr(self, "expver"):
+        if not hasattr(self, "expver") or self.expver is None:
             raise ValueError("Expver must be provided for Quaver format.")
-
         super().__init__(config, **kwargs)
 
         self.template_cache = []
 
         self.template = str(
             Path(self.quaver_template_folder)
-            / f"aifs_{{level_type}}_{self.quaver_template_grid_type}_data.grib"
+            # Template files are named in lowercase, e.g. aifs_pl_o96_data.grib.
+            / f"aifs_{{level_type}}_{self.quaver_template_grid_type.lower()}_data.grib"
         )
 
         self.pl_template = ekd.from_source("file", self.template.format(level_type="pl"))
@@ -61,8 +65,15 @@ class QuaverParser(CfParser):
 
         self.encoder = ekd.create_encoder("grib")
 
-        self.pl_file = ekd.create_target("file", self.get_output_filename("pl"))
-        self.sf_file = ekd.create_target("file", self.get_output_filename("sfc"))
+        # Open output files once for the lifetime of this parser.
+        # Using plain open() in "wb" mode so we own the file handle and
+        # field.to_target("file", fh) appends directly without earthkit
+        # ever reopening the path.
+        pl_path = self.get_output_filename("pl")
+        sfc_path = self.get_output_filename("sfc")
+        self.pl_file = open(pl_path, "wb")  # noqa: SIM115
+        self.sf_file = open(sfc_path, "wb")  # noqa: SIM115
+        _logger.info(f"Opened output files: {pl_path}, {sfc_path}")
 
         self.template_cache = self.cache_templates()
 
@@ -70,6 +81,9 @@ class QuaverParser(CfParser):
         self,
         fstep_iterator_results: iter,
         ref_time: np.datetime64,
+        source_interval_start: np.datetime64 = None,
+        source_interval_end: np.datetime64 = None,
+        **kwargs,
     ):
         """
         Process results from get_data_worker: reshape, concatenate, add metadata, and save.
@@ -77,51 +91,98 @@ class QuaverParser(CfParser):
         ----------
             fstep_iterator_results : Iterator over results from get_data_worker.
             ref_time : Forecast reference time for the sample.
+            source_interval_start : Start of the source (conditioning) window.
+            source_interval_end : End of the source (conditioning) window.
         Returns
         -------
             None
         """
+        # Identify variables that need accumulation across forecast steps
+        accum_vars = {
+            var
+            for var in self.channels
+            if self.mapping.get(
+                var, self.mapping.get(var.split("_")[0] if "_" in var else var, {})
+            ).get("accumulate", False)
+        }
+        # Running accumulator: {var_name: 1D numpy array}
+        accum_state: dict[str, NDArray] = {}
+
+        if accum_vars:
+            _logger.info(f"Accumulating total precipitation for variables: {accum_vars}")
+
         for result in fstep_iterator_results:
             if result is None:
                 continue
 
-            result = result.as_xarray().squeeze()
+            if not isinstance(result, xr.DataArray):
+                result = result.as_xarray().squeeze()
             result = result.sel(channel=self.channels)
-            da_fs = self.assign_coords(result)
 
-            step = np.unique(result.forecast_step.values)
-            if len(step) != 1:
-                raise ValueError(f"Expected single step value, got {step}")
+            unique_times = np.unique(result.valid_time.values)
 
-            step = int(step[0])
+            for vt in unique_times:
+                mask = result.valid_time.values == vt
+                sub = result.isel(ipoint=mask)
+                da_sub = self.assign_coords(sub)
 
-            sf_fields = []
-            pl_fields = []
-            for var in self.channels:
-                _, level, level_type = self.extract_var_info(var)
+                sf_fields = []
+                pl_fields = []
+                for var in self.channels:
+                    _, level, level_type = self.extract_var_info(var)
 
-                _logger.info(f"[Worker] Encoding var={var}, level={level}")
+                    _logger.info(f"[Worker] Encoding var={var}, level={level}")
 
-                field_data = da_fs.sel(channel=var)
-                field_data = self.scale_data(field_data, var)
-                template_field = self.template_cache.get((var, level), None)
-                if template_field is None:
-                    _logger.error(f"Template for var={var}, level={level} not found. Skipping.")
-                    continue
+                    field_data = da_sub.sel(channel=var)
+                    field_data = self.scale_data(field_data, var)
+                    field_values = field_data.values.copy()
 
-                metadata = self.get_metadata(ref_time=ref_time, step=step, level=level)
+                    # Clamp negative precipitation to zero.
+                    if var in accum_vars:
+                        field_values = np.maximum(field_values, 0.0)
 
-                encoded = self.encoder.encode(
-                    values=field_data.values, template=template_field, metadata=metadata
-                )
+                    # Accumulate precipitation: replace per-step values with
+                    # running total (current step + all previous steps).
+                    if var in accum_vars:
+                        if var in accum_state:
+                            accum_state[var] = accum_state[var] + field_values
+                        else:
+                            accum_state[var] = field_values.copy()
+                        field_values = accum_state[var].copy()
+                        _logger.debug(
+                            f"[Worker] Accumulated {var}: step sum={field_values.sum():.6g}, "
+                            f"total sum={accum_state[var].sum():.6g}"
+                        )
 
-                field_list = pl_fields if level_type == "pl" else sf_fields
-                field_list.append(encoded.to_field())
+                    template_field = self.template_cache.get((var, level), None)
+                    if template_field is None:
+                        _logger.error(f"Template for var={var}, level={level} not found. Skipping.")
+                        continue
 
-            self.save(pl_fields, "pl")
-            self.save(sf_fields, "sfc")
+                    metadata = self.get_metadata(
+                        ref_time=ref_time,
+                        valid_time=vt,
+                        source_interval_start=source_interval_start,
+                        source_interval_end=source_interval_end,
+                        level=level,
+                        var=var,
+                    )
 
-        _logger.info(f"Saved sample data to {self.output_format} in {self.output_dir}.")
+                    encoded = self.encoder.encode(
+                        values=field_values,
+                        template=template_field,
+                        metadata=metadata,
+                    )
+
+                    field_list = pl_fields if level_type == "pl" else sf_fields
+                    field_list.append(encoded.to_field())
+
+                for field in pl_fields:
+                    field.to_target("file", self.pl_file)
+                for field in sf_fields:
+                    field.to_target("file", self.sf_file)
+
+        _logger.info(f"Saved sample to {self.output_format} in {self.output_dir}.")
 
     def extract_var_info(self, var: str) -> tuple[str, str, str]:
         """
@@ -135,10 +196,20 @@ class QuaverParser(CfParser):
             tuple[str, str, str]
                 Variable short name, level, and level type.
         """
-        var_short = var.split("_")[0] if "_" in var else var
-        level = int(var.split("_")[-1]) if "_" in var else "sfc"
+        # Try full variable name first, then fall back to first token before '_'
+        if var in self.mapping:
+            var_short = var
+            var_config = self.mapping[var]
+            level = "sfc"
+        elif "_" in var:
+            var_short = var.split("_")[0]
+            var_config = self.mapping.get(var_short, {})
+            level = int(var.split("_")[-1])
+        else:
+            var_short = var
+            var_config = self.mapping.get(var_short, {})
+            level = "sfc"
 
-        var_config = self.mapping.get(var_short, {})
         if not var_config:
             raise ValueError(
                 f"Variable '{var} (using: {var_short})' not found in configuration mapping."
@@ -177,11 +248,9 @@ class QuaverParser(CfParser):
 
     def get_output_filename(self, level_type: str) -> Path:
         """
-        Generate output filename.
+        Generate output filename, including rank label when available.
         Parameters
         ----------
-            data_type : str
-                Type of data (e.g., 'prediction' or 'target').
             level_type : str
                 Level type (e.g., 'sfc', 'pl', etc.).
         Returns
@@ -189,9 +258,12 @@ class QuaverParser(CfParser):
             Path
                 Output filename as a Path object.
         """
+        rank_label = getattr(self, "rank_label", None)
+        # rank_label is the zero-padded rank of the source zarr file, e.g. "0000".
+        rank_tag = f"_rank{rank_label}" if rank_label else ""
         return (
-            Path(self.output_dir)
-            / f"{self.data_type}_{level_type}_{self.run_id}_{self.expver}.{self.file_extension}"
+            Path(self.output_dir) / f"{self.data_type}_{level_type}_{self.run_id}_{self.expver}"
+            f"{rank_tag}.{self.file_extension}"
         )
 
     def assign_coords(self, data: xr.DataArray) -> xr.DataArray:
@@ -217,38 +289,49 @@ class QuaverParser(CfParser):
     def get_metadata(
         self,
         ref_time: pd.Timestamp,
-        step: int,
+        valid_time: np.datetime64,
+        source_interval_start: np.datetime64,
+        source_interval_end: np.datetime64,
         level: str,
+        var: str = None,
     ):
         """
         Add metadata to the dataset attributes.
+
+        The GRIB ``date``/``time`` is set to ``source_interval_start``
+        (the true initialisation time of the forecast).  The GRIB ``step``
+        is computed as ``valid_time - source_interval_start`` (in hours).
         """
+        step_hours = int((valid_time - source_interval_start) / np.timedelta64(1, "h"))
 
         metadata = {
-            "date": ref_time,
-            "step": step * self.fstep_hours.astype(int),
+            "date": pd.Timestamp(source_interval_start),
+            "step": step_hours,
             "expver": self.expver,
             "marsClass": "rd",
         }
         if level != "sfc":
             metadata["level"] = level
+
+        # Override paramId if specified in the variable config.
+        if var is not None:
+            var_config = self.mapping.get(
+                var, self.mapping.get(var.split("_")[0] if "_" in var else var, {})
+            )
+            param_id = var_config.get("paramId")
+            if param_id is not None:
+                metadata["paramId"] = param_id
+
         return metadata
 
-    def save(self, encoded_fields: list, level_type: str):
-        """
-        Save the dataset to a file.
-        Parameters
-        ----------
-            encoded_fields : List
-                List of encoded fields to write.
-            level_type : str
-                Level type ('pl' or 'sfc').
-        Returns
-        -------
-            None
-        """
+    def close(self):
+        """Flush and close the output file handles."""
+        for fh in (self.pl_file, self.sf_file):
+            try:
+                fh.flush()
+                fh.close()
+            except Exception:
+                pass
 
-        file = self.pl_file if level_type == "pl" else self.sf_file
-
-        for field in encoded_fields:
-            file.write(field)
+    def __del__(self):
+        self.close()

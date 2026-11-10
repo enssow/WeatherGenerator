@@ -10,10 +10,15 @@
 # Standard library
 import logging
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+
+import omegaconf as oc
 
 # Third-party
 import xarray as xr
+
+from weathergen.evaluate.utils.derived_channels import is_derivable_channel
 
 _logger = logging.getLogger(__name__)
 _logger.setLevel(logging.INFO)
@@ -29,13 +34,10 @@ class ReaderOutput:
         Dictionary of xarray Datasets for targets, indexed by forecast step.
     prediction : dict[str, xr.Dataset]
         Dictionary of xarray Datasets for predictions, indexed by forecast step.
-    points_per_sample : xr.DataArray | None
-        xarray DataArray containing the number of points per sample, if `return_counts` is True
     """
 
     target: dict[str, xr.Dataset]
     prediction: dict[str, xr.Dataset]
-    points_per_sample: xr.DataArray | None
 
 
 @dataclass
@@ -52,6 +54,8 @@ class DataAvailability:
         List of forecast steps requested
     samples:
         List of samples requested
+    ensemle:
+        List of ensemble member identifiers
     """
 
     score_availability: bool
@@ -61,33 +65,76 @@ class DataAvailability:
     ensemble: list[str] | None = None
 
 
-class Reader:
+class Reader(ABC):
     def __init__(self, eval_cfg: dict, run_id: str, private_paths: dict[str, str] | None = None):
         """
         Generic data reader class.
 
         Parameters
         ----------
-        eval_cfg :
-            config with plotting and evaluation options for that run id
-        run_id :
-            run id of the model
+        eval_cfg : dict
+            Config with plotting and evaluation options for that run id.
+        run_id : str
+            Run identifier of the model
         private_paths:
-            dictionary of private paths for the supported HPC
+            Dictionary of private paths for the supported HPC
         """
         self.eval_cfg = eval_cfg
         self.run_id = run_id
         self.private_paths = private_paths
-        self.streams = eval_cfg.streams.keys()
+        self.streams = list(eval_cfg.streams.keys())
         # TODO: propagate it to the other functions using global plotting opts
         self.global_plotting_options = eval_cfg.get("global_plotting_options", {})
 
-        # If results_base_dir and model_base_dir are not provided, default paths are used
-        self.model_base_dir = self.eval_cfg.get("model_base_dir", None)
+        # Default paths if not provided
+        self.model_base_dir = eval_cfg.get("model_base_dir")
+        self.results_base_dir = eval_cfg.get("results_base_dir")
 
-        self.results_base_dir = self.eval_cfg.get(
-            "results_base_dir", None
-        )  # base directory where results will be stored
+    def get_eval_settings(self, stream: str) -> dict:
+        """Extract evaluation settings that affect score computation for a stream.
+
+        These settings are saved into JSON score files so that cached scores can
+        be invalidated when settings change (e.g. regridding, ensemble selection,
+        rank files, aggregation dimensions).
+
+        Parameters
+        ----------
+        stream : str
+            The stream name.
+
+        Returns
+        -------
+        dict
+            A dictionary of plain Python types (JSON-serializable).  Only
+            non-default / non-empty values are included to keep the JSON compact
+            and avoid spurious mismatches.
+        """
+        stream_cfg = self.get_stream(stream)
+
+        # Collect raw config values; skip falsy / default entries
+        entries = {
+            "regrid": stream_cfg.get("regrid"),
+            "ensemble": stream_cfg.get("evaluation", {}).get("ensemble"),
+            "rank": self.eval_cfg.get("rank"),
+            "agg_dims": self.eval_cfg.get("agg_dims"),
+            "derived_channels": stream_cfg.get("derived_channels"),
+        }
+        # Defaults that should not trigger cache invalidation
+        defaults = {"ensemble": "all", "rank": "all", "agg_dims": "ipoint"}
+
+        settings: dict = {}
+        for key, val in entries.items():
+            if not val or val == defaults.get(key):
+                continue
+            settings[key] = (
+                oc.OmegaConf.to_container(val, resolve=True) if oc.OmegaConf.is_config(val) else val
+            )
+
+        # Store the source (zarr) forecast steps so the cache is invalidated
+        # when the underlying data changes (e.g. new rollout length).
+        settings["forecast_steps"] = sorted(int(f) for f in self.get_forecast_steps())
+
+        return settings
 
     def get_stream(self, stream: str):
         """
@@ -105,39 +152,44 @@ class Reader:
         """
         return self.eval_cfg.streams.get(stream, {})
 
+    @abstractmethod
     def get_samples(self) -> set[int]:
         """Placeholder implementation of sample getter. Override in subclass."""
-        return set()
+        pass
 
+    @abstractmethod
     def get_forecast_steps(self) -> set[int]:
         """Placeholder implementation forecast step getter. Override in subclass."""
-        return set()
+        pass
 
     # TODO: get this from config
+    @abstractmethod
     def get_channels(self, stream: str | None = None) -> list[str]:
         """Placeholder implementation channel names getter. Override in subclass."""
-        return list()
+        pass
 
+    @abstractmethod
     def get_ensemble(self, stream: str | None = None) -> list[str]:
         """Placeholder implementation ensemble member names getter. Override in subclass."""
-        return list()
+        pass
 
-    def is_regular(self, stream: str) -> bool:
+    def is_gridded_data(self, stream: str) -> bool:
         """
         Placeholder implementation to check if lat/lon are regularly spaced.
         Override in subclass.
         """
         return True
 
+    @abstractmethod
     def load_scores(self, stream: str, region: str, metric: str) -> xr.DataArray:
         """Placeholder to load pre-computed scores for a given run, stream, metric"""
-        return None
+        pass
 
     def check_availability(
         self,
         stream: str,
         available_data: dict | None = None,
-        mode: str = "",
+        mode: str = "evaluation",
     ) -> DataAvailability:
         """
         Check if requested channels, forecast steps and samples are
@@ -145,15 +197,18 @@ class Reader:
         ii) available in the source file (e.g. the Zarr file, return error otherwise)
         Additionally, if channels, forecast steps or samples is None/'all', it will
         i) set the variable to all available vars in source file
-        ii) return True only if the respective variable contains the same indeces in metric file
-            and source file (return False otherwise)
+        ii) return True only if the respective variable contains the same indices in
+            metric file and source file (return False otherwise)
 
         Parameters
         ----------
-        stream :
+        stream : str
             The stream considered.
-        available_data :
-            The available data loaded from metric file.
+        available_data : dict or None
+            Available data loaded from metric file.
+        mode : str
+            Mode string. Can be 'evaluation' or 'plotting'.
+
         Returns
         -------
         DataAvailability
@@ -161,10 +216,14 @@ class Reader:
             - channels: list of channels or None if 'all'
             - fsteps: list of forecast steps or None if 'all'
             - samples: list of samples or None if 'all'
+            - ensemble: list of ensembleor None if 'all'
         """
 
-        # fill info for requested channels, fsteps, samples
+        # Fill requested info for channels, fsteps, samples, ensemble
         requested_data = self._get_channels_fsteps_samples(stream, mode)
+
+        if not requested_data.score_availability:
+            return requested_data
 
         channels = requested_data.channels
         fsteps = requested_data.fsteps
@@ -177,7 +236,7 @@ class Reader:
             "ensemble": set(ensemble) if ensemble is not None else None,
         }
 
-        # fill info from available metric file (if provided)
+        # Extract available info from metric file (if provided)
         available = {
             "channel": (
                 set(available_data["channel"].values.ravel())
@@ -196,12 +255,12 @@ class Reader:
             ),
             "ensemble": (
                 set(available_data["ens"].values.ravel())
-                if available_data is not None and "ens" in available_data.coords
+                if (available_data is not None and "ens" in available_data.coords)
                 else set()
             ),
         }
 
-        # fill info from reader
+        # Extract actual reader data (from source)
         reader_data = {
             "fstep": set(int(f) for f in self.get_forecast_steps()),
             "sample": set(int(s) for s in self.get_samples()),
@@ -211,38 +270,56 @@ class Reader:
 
         check_score = True
         corrected = False
+
         for name in ["channel", "fstep", "sample", "ensemble"]:
             if requested[name] is None:
-                # Default to all in Zarr
-                requested[name] = reader_data[name]
-                # If file with metrics exists, must exactly match
-                if available_data is not None and reader_data[name] != available[name]:
-                    _logger.info(
-                        f"Requested all {name}s for {mode}, but previous config was a "
-                        "strict subset. Recomputation required."
-                    )
-                    check_score = False
+                # Default to all in Zarr (or to cached score coords if available)
+                if available_data is not None and available[name]:
+                    # Trust the cached score's coordinates (may include expanded
+                    # sub-steps beyond zarr base fsteps).  Validity is guaranteed
+                    # by the eval_settings check in load_single_score.
+                    requested[name] = available[name]
+                else:
+                    requested[name] = reader_data[name]
 
-            # Must be subset of Zarr
-            if not requested[name] <= reader_data[name]:
+            # Must be subset of source data (skip when validating a cached score,
+            # since scores may contain expanded sub-steps beyond zarr base fsteps)
+            if available_data is not None:
+                pass
+            elif not requested[name] <= reader_data[name]:
                 missing = requested[name] - reader_data[name]
 
+                # Special handling for ensemble mean and std
                 if name == "ensemble" and "mean" in missing:
                     missing.remove("mean")
+                if name == "ensemble" and "std" in missing:
+                    missing.remove("std")
+
+                # Derivable channels (e.g. 10ff) will be computed later by
+                # DeriveChannels — keep them in the requested set.
+                if name == "channel":
+                    derivable = {ch for ch in missing if is_derivable_channel(ch)}
+                    if derivable:
+                        _logger.debug(
+                            f"Channels {derivable} not in source but recognised "
+                            f"as derivable – keeping them."
+                        )
+                    missing -= derivable
+
                 if missing:
                     _logger.info(
                         f"Requested {name}(s) {missing} is unavailable. "
                         f"Removing missing {name}(s) for {mode}."
                     )
-                    requested[name] = requested[name] & reader_data[name]
+                    requested[name] = requested[name] - missing
                     corrected = True
 
             # Must be a subset of available_data (if provided)
             if available_data is not None and not requested[name] <= available[name]:
                 missing = requested[name] - available[name]
                 _logger.info(
-                    f"{name.capitalize()}(s) {missing} missing in previous evaluation."
-                    "Recomputation required."
+                    f"{name.capitalize()}(s) {missing} missing in previous "
+                    "evaluation. Recomputation required."
                 )
                 check_score = False
 
@@ -281,40 +358,63 @@ class Reader:
             - fsteps: list of forecast steps or None if 'all'
             - samples: list of samples or None if 'all'
         """
-        assert mode == "plotting" or mode == "evaluation", (
-            "get_channels_fsteps_samples:: Mode should be either 'plotting' or 'evaluation'"
+
+        # Helper function to process range strings like '1-3' into lists [1,2,3]
+        def _parse_range_list(value, name):
+            if isinstance(value, str) and value != "all":
+                assert re.match(r"^\d+-\d+$", value), (
+                    f"String format for {name} in config must be "
+                    f"'digit-digit' or 'all'. "
+                    f"Got '{value}'."
+                )
+                start, end = map(int, value.split("-"))
+                return list(range(start, end + 1))
+            return value
+
+        # Normalize None vs "all"
+        def normalize(val):
+            return (
+                None
+                if (val == "all" or val is None)
+                else list(val)
+                if isinstance(val, list)
+                else val
+            )
+
+        assert mode in ("plotting", "evaluation"), (
+            f"Mode must be either 'plotting' or 'evaluation'. Got '{mode}' instead."
         )
 
         stream_cfg = self.get_stream(stream)
-        assert stream_cfg.get(mode, False), "Mode does not exist in stream config. Please add it."
+        if not stream_cfg.get(mode, False):
+            _logger.warning(
+                f"Mode '{mode}' does not exist in stream config for '{stream}'. Skipping."
+            )
+            return DataAvailability(
+                score_availability=False,
+                channels=None,
+                fsteps=None,
+                samples=None,
+                ensemble=None,
+            )
 
         samples = stream_cfg[mode].get("sample", None)
         fsteps = stream_cfg[mode].get("forecast_step", None)
         channels = stream_cfg.get("channels", None)
         ensemble = stream_cfg[mode].get("ensemble", None)
+
         if ensemble == "mean":
             ensemble = ["mean"]
+        elif ensemble == "std":
+            ensemble = ["std"]
 
-        if isinstance(fsteps, str) and fsteps != "all":
-            assert re.match(r"^\d+-\d+$", fsteps), (
-                "String format for forecast_step in config must be 'digit-digit' or 'all'"
-            )
-            fsteps = list(range(int(fsteps.split("-")[0]), int(fsteps.split("-")[1]) + 1))
-        if isinstance(samples, str) and samples != "all":
-            assert re.match(r"^\d+-\d+$", samples), (
-                "String format for sample in config must be 'digit-digit' or 'all'"
-            )
-            samples = list(range(int(samples.split("-")[0]), int(samples.split("-")[1]) + 1))
-        if isinstance(ensemble, str) and ensemble not in {"all", "mean"}:
-            assert re.match(r"^\d+-\d+$", ensemble), (
-                "String format for sample in config must be 'digit-digit' or 'all'"
-            )
-            ensemble = list(range(int(ensemble.split("-")[0]), int(ensemble.split("-")[1]) + 1))
+        fsteps = _parse_range_list(fsteps, "forecast_step")
+        samples = _parse_range_list(samples, "sample")
 
         return DataAvailability(
             score_availability=True,
-            channels=None if (channels == "all" or channels is None) else list(channels),
-            fsteps=None if (fsteps == "all" or fsteps is None) else list(fsteps),
-            samples=None if (samples == "all" or samples is None) else list(samples),
-            ensemble=None if (ensemble == "all" or ensemble is None) else list(ensemble),
+            channels=normalize(channels),
+            fsteps=normalize(fsteps),
+            samples=normalize(samples),
+            ensemble=normalize(ensemble),
         )
