@@ -322,6 +322,8 @@ def export_from_args(args: list) -> None:
     # Load configuration
     if args.output_format == "verif":
         config_file = Path(_REPO_ROOT, "config/evaluate/config_zarr2verif.yaml")
+    elif args.output_format == "icon":
+        config_file = Path(_REPO_ROOT, "config/evaluate/config_zarr2icon.yaml")
     else:
         config_file = Path(_REPO_ROOT, "config/evaluate/config_zarr2cf.yaml")
     config = OmegaConf.load(config_file)

@@ -1,0 +1,145 @@
+forcings:
+  - "cos_julian_day"
+  - "cos_latitude"
+  - "cos_local_time"
+  - "cos_longitude"
+  - "insolation"
+  - "sin_julian_day"
+  - "sin_latitude"
+  - "sin_local_time"
+  - "sin_longitude"
+
+variables:
+  z:
+    parameter: (0, 3, 4)
+    level_type: "pl"
+  q: 
+    parameter: (0, 1, 0)
+    level_type: "pl"
+  t: 
+    parameter: (0, 0, 0)
+    level_type: "pl"
+  u:
+    parameter: (0, 2, 2)
+    level_type: "pl"
+  v:
+    parameter: (0, 2, 3)
+    level_type: "pl"
+  w:
+    parameter: (0, 2, 9)
+    level_type: "pl"
+  100u: 
+    parameter: (0, 2, 2)
+    first: (103, 0, 100)
+  10u:
+    parameter: (0, 2, 2)
+    first: (103, 0, 10)
+  100v:  
+    parameter: (0, 2, 3)
+    first: (103, 0, 100)
+  10v:
+    parameter: (0, 2, 3)
+    first: (103, 0, 10)
+  2t:
+    parameter: (0, 0, 0)
+    first: (103, 0, 2)
+  2d:
+    parameter: (0, 0, 6)
+    first: (103, 0, 2)
+  skt:
+    parameter: (0, 0, 17)
+  z:
+    parameter: (0, 3, 4)
+  sp:
+    parameter: (0, 3, 0)
+  msl:
+    parameter: (0, 3, 1)
+    first: (101, None, None)
+  CAPE_ML:
+    parameter: (0, 7, 6)
+    first: (192, None, None)
+  CAPE_MU:
+    parameter: (0, 7, 6)
+    first: (193, None, None)
+  CIN_ML:
+    parameter: (0, 7, 7)
+    first: (192, None, None)
+  CIN_MU:
+    parameter: (0, 7, 7)
+    first: (193, None, None)
+  LPI:
+    parameter: (0, 17, 192)
+  hcc:
+    parameter: (0, 6, 22)
+    first: (100, -2, 0)
+    second: (100, -2, 400)
+  mcc:
+    parameter: (0, 6, 22)
+    first: (100, -2, 400)
+    second: (100, -2, 800)
+  lcc:
+    parameter: (0, 6, 22)
+    first: (100, -2, 800)
+    second: (1, None, None)
+  tcc:
+    parameter: (0, 6, 1)
+  lsm:
+    parameter: (2, 0, 0)
+  PLCOV:
+    parameter: (2, 0, 4)
+  SKC:
+    parameter: (2, 0, 199)
+  SOILTYP:
+    parameter: (2, 3, 196)
+  sdor:
+    parameter: (0, 3, 20)
+  anor:
+    parameter: (0, 3, 21)
+  slor:
+    parameter: (0, 3, 22)
+  isor:
+    parameter: (0, 3, 24)
+  W_SO:
+    parameter: (2, 3, 20)
+    first: (106, 2, 1)
+    second: (106, 2, 3)
+  tp:
+    parameter: (0, 1, 52)
+    processing: 1
+    duration: 60
+  tp_6h:
+    parameter: (0, 1, 52)
+    processing: 1
+    duration: 360
+  ro:
+    parameter: (2, 0, 5)
+    first: (106, 2, 0)
+    processing: 1
+    duration: 60
+  ro_6h:
+    parameter: (2, 0, 5)
+    first: (106, 2, 0)
+    processing: 1
+    duration: 360
+  ssrd:
+    parameter: (0, 4, 7)
+    processing: 0
+    duration: 1 / 3600
+  ssrd_6h:
+    parameter: (0, 4, 7)
+    processing: 0
+    factor: 1 / 21600
+  strd:
+    parameter: (0, 5, 3)
+    processing: 0
+    duration: 60
+    factor: 1 / 3600
+  strd_6h:
+    parameter: (0, 5, 3)
+    processing: 0
+    duration: 360
+    factor: 1 / 21600
+  VMAX_10M:
+    parameter: (0, 2, 22)
+    first: (103, 0, 10)
+    processing: 2

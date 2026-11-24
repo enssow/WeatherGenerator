@@ -1,3 +1,9 @@
+#!/usr/bin/env -S uv run
+# /// script
+# dependencies = ["eccodes"]
+# [tool.uv]
+# exclude-newer = "2025-05-01T00:00:00Z"
+# ///
 """Native ICON GRIB2 export of physical (already denormalized) ICON output.
 
 The reference Zarr supplies coordinates and interval metadata only, never predictions
@@ -20,6 +26,9 @@ import re
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
+import eccodes as e
+from omegaconf import OmegaConf
+
 
 import numpy as np
 import zarr
@@ -28,83 +37,6 @@ from weathergen.evaluate.export.cf_utils import CfParser
 
 _logger = logging.getLogger(__name__)
 _logger.setLevel(logging.INFO)
-
-SURFACE = (1, None, None)
-ABSENT = (255, None, None)
-LEVELS = (50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000)
-PRESSURE_PARAMETERS = {
-    "z": (0, 3, 4),
-    "q": (0, 1, 0),
-    "t": (0, 0, 0),
-    "u": (0, 2, 2),
-    "v": (0, 2, 3),
-    "w": (0, 2, 9),
-}
-FORCINGS = frozenset(
-    (
-        "cos_julian_day",
-        "cos_latitude",
-        "cos_local_time",
-        "cos_longitude",
-        "insolation",
-        "sin_julian_day",
-        "sin_latitude",
-        "sin_local_time",
-        "sin_longitude",
-    )
-)
-
-
-@dataclass(frozen=True)
-class FieldSpec:
-    parameter: tuple
-    first: tuple = SURFACE
-    second: tuple = ABSENT
-    processing: int | None = None
-    duration: int = 0  # minutes; gust duration comes from recorded metadata
-    factor: float = 1.0
-    level_type: str = "sfc"
-
-
-FIELD_SPECS = {
-    "100u": FieldSpec((0, 2, 2), (103, 0, 100)),
-    "10u": FieldSpec((0, 2, 2), (103, 0, 10)),
-    "100v": FieldSpec((0, 2, 3), (103, 0, 100)),
-    "10v": FieldSpec((0, 2, 3), (103, 0, 10)),
-    "2t": FieldSpec((0, 0, 0), (103, 0, 2)),
-    "2d": FieldSpec((0, 0, 6), (103, 0, 2)),
-    "skt": FieldSpec((0, 0, 17)),
-    "z": FieldSpec((0, 3, 4)),
-    "sp": FieldSpec((0, 3, 0)),
-    "msl": FieldSpec((0, 3, 1), (101, None, None)),
-    "CAPE_ML": FieldSpec((0, 7, 6), (192, None, None)),
-    "CAPE_MU": FieldSpec((0, 7, 6), (193, None, None)),
-    "CIN_ML": FieldSpec((0, 7, 7), (192, None, None)),
-    "CIN_MU": FieldSpec((0, 7, 7), (193, None, None)),
-    "LPI": FieldSpec((0, 17, 192)),
-    "hcc": FieldSpec((0, 6, 22), (100, -2, 0), (100, -2, 400)),
-    "mcc": FieldSpec((0, 6, 22), (100, -2, 400), (100, -2, 800)),
-    "lcc": FieldSpec((0, 6, 22), (100, -2, 800), SURFACE),
-    "tcc": FieldSpec((0, 6, 1)),
-    "lsm": FieldSpec((2, 0, 0)),
-    "PLCOV": FieldSpec((2, 0, 4)),
-    "SKC": FieldSpec((2, 0, 199)),
-    "SOILTYP": FieldSpec((2, 3, 196)),
-    "sdor": FieldSpec((0, 3, 20)),
-    "anor": FieldSpec((0, 3, 21)),
-    "slor": FieldSpec((0, 3, 22)),
-    "isor": FieldSpec((0, 3, 24)),
-    "W_SO": FieldSpec((2, 3, 20), (106, 2, 1), (106, 2, 3)),
-    "tp": FieldSpec((0, 1, 52), processing=1, duration=60),
-    "tp_6h": FieldSpec((0, 1, 52), processing=1, duration=360),
-    "ro": FieldSpec((2, 0, 5), (106, 2, 0), processing=1, duration=60),
-    "ro_6h": FieldSpec((2, 0, 5), (106, 2, 0), processing=1, duration=360),
-    "ssrd": FieldSpec((0, 4, 7), processing=0, duration=60, factor=1 / 3600),
-    "ssrd_6h": FieldSpec((0, 4, 7), processing=0, duration=360, factor=1 / 21600),
-    "strd": FieldSpec((0, 5, 3), processing=0, duration=60, factor=1 / 3600),
-    "strd_6h": FieldSpec((0, 5, 3), processing=0, duration=360, factor=1 / 21600),
-    "VMAX_10M": FieldSpec((0, 2, 22), (103, 0, 10), processing=2),
-}
 
 
 def _field_spec(name, metadata):
@@ -168,20 +100,10 @@ def _coordinates(lat, lon):
 
 
 class IconParser(CfParser):
-    # Output path -> {(channel, member)} written by any instance in this process.
-    _written: dict[Path, set[tuple[str, int]]] = {}
-
-    def __init__(self, config, **kwargs):
-        try:
-            import eccodes
-        except ImportError as exc:
-            raise ImportError(
-                "ecCodes is required only for ICON export. Install conda-forge "
-                "python-eccodes/eccodes in a separate Pixi environment."
-            ) from exc
-        self.ec = eccodes
-        kwargs.setdefault("fstep_hours", 1)
-        super().__init__(config, **kwargs)
+    def __init__(self, config: OmegaConf, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        super().__init__(config=config)
         self.templates = {}
         self.files = {}  # handles open for the sample being processed
         self.created_paths = []
@@ -241,13 +163,12 @@ class IconParser(CfParser):
         )
         return tuple(
             None
-            if not self.ec.codes_is_defined(handle, key) or self.ec.codes_is_missing(handle, key)
-            else self.ec.codes_get_long(handle, key)
+            if not e.codes_is_defined(handle, key) or e.codes_is_missing(handle, key)
+            else e.codes_get_long(handle, key)
             for key in keys
         )
 
     def _grid_identity(self, handle):
-        e = self.ec
         if e.codes_get_long(handle, "gridDefinitionTemplateNumber") != 101:
             raise ValueError("ICON templates require grid template 3.101 (unstructured_grid)")
         if e.codes_get_long(handle, "numberOfDataPoints") != len(self.native):
@@ -267,7 +188,6 @@ class IconParser(CfParser):
         )
 
     def _load_templates(self):
-        e = self.ec
         prototypes = {name: _prototype(name, spec) for name, spec in self.specs.items()}
         needed = set(prototypes.values())
         retained = {}
@@ -384,7 +304,6 @@ class IconParser(CfParser):
         return errors
 
     def _encode(self, name, values, ref_time, valid_time, member, members):
-        e = self.ec
         spec = self.specs[name]
         ref_time, valid_time = self._minute_time(ref_time), self._minute_time(valid_time)
         end = int((valid_time - ref_time) / np.timedelta64(1, "m"))
