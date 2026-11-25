@@ -39,49 +39,8 @@ _logger = logging.getLogger(__name__)
 _logger.setLevel(logging.INFO)
 
 
-def _field_spec(name, metadata):
-    if name in FIELD_SPECS:
-        spec = FIELD_SPECS[name]
-        if name == "VMAX_10M":
-            period = metadata.get(name, {}).get("period", [])
-            if len(period) != 2:
-                raise ValueError("VMAX_10M requires a two-ended variables_metadata.period")
-            minutes = []
-            for value in period:
-                match = re.fullmatch(r"(\d+)(m|h)", str(value))
-                if not match:
-                    raise ValueError(f"Invalid VMAX_10M period: {period}")
-                minutes.append(int(match[1]) * (60 if match[2] == "h" else 1))
-            if minutes[1] <= minutes[0]:
-                raise ValueError(f"Invalid VMAX_10M period: {period}")
-            spec = replace(spec, duration=minutes[1] - minutes[0])
-        return spec
-    match = re.fullmatch(r"(z|q|t|u|v|w)_(\d+)", name)
-    if match and int(match[2]) in LEVELS:
-        return FieldSpec(PRESSURE_PARAMETERS[match[1]], (100, -2, int(match[2])), level_type="pl")
-    raise ValueError(f"Unmapped ICON physical channel: {name}")
-
-
 def _identity(spec):
     return (*spec.parameter, *spec.first, *spec.second, spec.processing)
-
-
-def _prototype(name, spec):
-    if spec.level_type == "pl" or name == "z":
-        prefix = name.split("_")[0]
-        parameter = (0, 2, 8) if prefix == "w" else PRESSURE_PARAMETERS[prefix]
-        return "pl", _identity(FieldSpec(parameter, (100, -2, 700 if prefix == "w" else 500)))
-    if name in ("100u", "100v"):
-        spec = FIELD_SPECS["10" + name[-1]]
-    elif name in ("PLCOV", "SKC", "sdor", "anor", "slor", "isor"):
-        spec = FIELD_SPECS["lsm"]
-    elif name == "skt":
-        spec = FieldSpec((0, 0, 0))
-    elif name in ("ro", "ro_6h", "tp_6h"):
-        spec = FIELD_SPECS["tp"]
-    elif name in ("ssrd", "ssrd_6h", "strd_6h"):
-        spec = FIELD_SPECS["strd"]
-    return "sfc", _identity(spec)
 
 
 def _coordinates(lat, lon):
@@ -104,6 +63,7 @@ class IconParser(CfParser):
         for k, v in kwargs.items():
             setattr(self, k, v)
         super().__init__(config=config)
+        print("config is", config)
         self.templates = {}
         self.files = {}  # handles open for the sample being processed
         self.created_paths = []
@@ -129,17 +89,18 @@ class IconParser(CfParser):
         ):
             raise ValueError("Reference grid contains duplicate coordinates or is empty")
         requested = list(self.channels)
+        print("Requested channels:", requested)
         if len(set(requested)) != len(requested):
             raise ValueError("ICON channel selection contains duplicates")
         excluded = [
             name
             for name in requested
-            if name in FORCINGS and metadata.get(name, {}).get("computed_forcing")
+            if name in config.forcings and metadata.get(name, {}).get("computed_forcing")
         ]
         self.channels = [name for name in requested if name not in excluded]
         if excluded:
             _logger.info("Excluded computed_forcing channels: %s", ", ".join(excluded))
-        self.specs = {name: _field_spec(name, metadata) for name in self.channels}
+        self.specs = {name: self._field_spec(name, metadata) for name in self.channels}
         if not self.specs:
             raise ValueError("ICON selection contains no physical channels")
         try:
@@ -147,6 +108,63 @@ class IconParser(CfParser):
         except BaseException:
             self.close()
             raise
+
+    def _prototype(self, spec, name):
+        if spec.get("level_type", "sfc") == "pl" or "z" in name:
+            prefix = name.split("_")[0]
+            param_dict = self.config.variables[prefix]
+            param_dict["first"] = (100, -2, 700)
+            if prefix == "w":
+                param_dict["parameter"] = (0, 2, 8)
+                param_dict["second"] = (100, -2, 500)
+        else:
+            param_dict = self.config.variables[name]
+        if "first" not in param_dict:
+            param_dict["first"] =  (1, None, None) # surface
+        if "second" not in param_dict:
+            param_dict["second"] = (255, None, None) # absent
+        # if "factor" not in param_dict:
+        #     param_dict["factor"] = 1
+        # if "processing" not in param_dict:
+        #     param_dict["processing"] = None
+        # if "duration" not in param_dict:
+        #     param_dict["duration"] = 0
+        if "level_type" not in param_dict:
+            param_dict["level_type"] = "sfc"
+
+        print("param_dict for", name, "is", (param_dict["parameter"], param_dict["first"], param_dict["second"]))
+        
+        return param_dict["level_type"], (*param_dict["parameter"], *param_dict["first"], *param_dict["second"])
+
+    def _field_spec(self, name, metadata):
+        FIELD_SPECS = self.config.variables
+        if name in FIELD_SPECS:
+            spec = FIELD_SPECS[name]
+            if name == "VMAX_10M":
+                period = metadata.get(name, {}).get("period", [])
+                if len(period) != 2:
+                    raise ValueError("VMAX_10M requires a two-ended variables_metadata.period")
+                minutes = []
+                for value in period:
+                    match = re.fullmatch(r"(\d+)(m|h)", str(value))
+                    if not match:
+                        raise ValueError(f"Invalid VMAX_10M period: {period}")
+                    minutes.append(int(match[1]) * (60 if match[2] == "h" else 1))
+                if minutes[1] <= minutes[0]:
+                    raise ValueError(f"Invalid VMAX_10M period: {period}")
+                spec = replace(spec, duration=minutes[1] - minutes[0])
+            return spec
+        match = re.fullmatch(r"(z|q|t|u|v|w)_(\d+)", name)
+        print("match",match)
+        print("match[1]", match[1])
+        print("match[2]", match[2])
+        if match and int(match[2]) in self.config.levels:
+            print("match is valid and level is in config.levels")
+            param_dict = FIELD_SPECS[match[1]]
+            param_dict["first"] = (100, -2, int(match[2]))
+            param_dict["level_type"] = "pl"
+            return param_dict
+        raise ValueError(f"Unmapped ICON physical channel: {name}")
 
     def _message_identity(self, handle):
         keys = (
@@ -188,7 +206,8 @@ class IconParser(CfParser):
         )
 
     def _load_templates(self):
-        prototypes = {name: _prototype(name, spec) for name, spec in self.specs.items()}
+        prototypes = {name: self._prototype(spec, name) for name, spec in self.specs.items()}
+        print("Prototypes:", prototypes)
         needed = set(prototypes.values())
         retained = {}
         grid = None
@@ -201,6 +220,7 @@ class IconParser(CfParser):
                 with open(path, "rb") as source:
                     while (handle := e.codes_grib_new_from_file(source)) is not None:
                         try:
+                            print("Processing handle:", handle)
                             count += 1
                             identity = self._grid_identity(handle)
                             if grid is not None and identity != grid:
@@ -209,6 +229,7 @@ class IconParser(CfParser):
                                 )
                             grid = identity
                             key = (level_type, self._message_identity(handle))
+                            print("Processing key:", key)
                             if key in needed:
                                 if key in retained:
                                     raise ValueError(f"Ambiguous ICON prototype: {key}")
@@ -217,6 +238,8 @@ class IconParser(CfParser):
                             e.codes_release(handle)
                 if not count:
                     raise ValueError(f"Empty ICON template file: {path}")
+            print("Needed templates:", needed)
+            print("Retained templates:", retained.keys())
             missing = needed - retained.keys()
             if missing:
                 raise ValueError(f"Missing complete ICON prototypes: {sorted(missing, key=str)}")
